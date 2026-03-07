@@ -1,4 +1,4 @@
-# Metaflow CLI Extensibility Proposal (Issue Draft)
+# Metaflow CLI Extensibility Proposal
 
 ## Metaflow CLI Exploration:
 
@@ -127,7 +127,7 @@ Compatibility:
 
 This gives extensions a stable place to hook into the CLI startup process without modifying core logic.
 
-Changes mentioned in this PR:
+Changes mentioned in this PR: https://github.com/rawadhossain/metaflow/pull/5
 
 ## 2. Decorator-driven run/resume option extension
 
@@ -151,7 +151,7 @@ Compatibility:
 - Existing CLI behavior remains unchanged.
 - This simply allows decorators to add new options if desired.
 
-Changes mentioned in this PR:
+Changes mentioned in this PR: https://github.com/rawadhossain/metaflow/pull/6
 
 ## 3. Shared CLI argument serializer
 
@@ -170,7 +170,7 @@ Compatibility:
 - behavior remains backward compatible
 - the change mainly reduces duplicated logic
 
-Changes mentioned in this PR:
+Changes mentioned in this PR: https://github.com/rawadhossain/metaflow/pull/7
 
 ## Testing
 
@@ -185,6 +185,8 @@ The tests cover the three explored changes:
 - shared CLI argument serialization (`dict_to_cli_args`)
 
 All tests currently pass locally using the existing Metaflow `pytest` setup.
+
+![Test](image.png)
 
 # My Position on the Issue
 
