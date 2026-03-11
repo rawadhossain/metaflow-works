@@ -1,5 +1,9 @@
 # Metaflow Decorator Lifecycle Hooks Proposal
 
+### Issue Link: [Issue](https://github.com/saikonen/metaflow/issues/3)
+
+### Linked PR for this issue: [PR Link](https://github.com/rawadhossain/metaflow/pull/10)
+
 ## Exploring the current decorator lifecycle
 
 While exploring the decorator system in **Metaflow**, I looked into how decorators are initialized and how lifecycle hooks are executed during a flow run.
