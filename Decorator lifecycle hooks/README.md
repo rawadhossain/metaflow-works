@@ -35,7 +35,7 @@ task_finished
 
 Decorators are stored on each step as a list (`step.decorators`), and lifecycle hooks are executed by iterating through that list.
 
-One important observation is that **decorator execution order is determined by the order of that list**. But it is not guaranteed in all situations.
+One important observation is that **decorator execution order is determined by the order of that list**. But that order is only implicit: it follows Python decorator application order and any late attachment, and **there was no supported way to declare that one decorator must run before another** when both run in the same stage.
 
 Decorators can also be attached through:
 
@@ -45,7 +45,7 @@ Decorators can also be attached through:
 
 These can change the order in which decorators appear internally.
 
-Because of this, **decorators cannot reliably assume that another decorator has already run within the same stage**.
+Because of this, **decorators cannot reliably assume that another decorator has already run within the same stage** unless they defensively scan the full list or avoid ordering-sensitive work.
 
 Hence the issue was raised.
 
@@ -84,41 +84,42 @@ For example:
 
 Although the environments are different, the structure of the code was very similar.
 
+### iii. State carried on `self` across hooks
+
+Some decorators set `self.metadata`, `self.task_datastore`, or similar fields in `task_pre_step` and read them again in `task_finished`. If `task_pre_step` does not finish cleanly, `task_finished` can fail or see stale values.
+
 # Changes I made
 
-I experimented with a few changes to improve the current situation while keeping **backwards compatibility**. Listing them below.
+I experimented with changes to improve the situation while keeping **backwards compatibility**. They are listed below.
 
-## 1. Explicit decorator ordering
+## 1. Declared ordering with `DEPENDS_ON`
 
-To make decorator execution more predictable, I introduced a simple ordering mechanism.
+To make ordering **explicit** when it matters, each `StepDecorator` defines:
 
-Each `StepDecorator` now defines `ORDER_PRIORITY = 0`
+```python
+DEPENDS_ON = []
+```
 
-Decorators can override this value if they need to run earlier or later relative to others.
+`DEPENDS_ON` is a list of **other decorators’ `name` strings** that must run **before** this decorator in every lifecycle pass that walks `step.decorators`. For a single dependency you can also use a string; it is normalized to a one-element list inside `_sort_step_decorators`.
 
-Decorators are sorted using `(ORDER_PRIORITY, original_index)`
+The runtime builds a **directed graph**: an edge from provider `P` to dependent `D` means `D` listed `P` in `DEPENDS_ON`. It then runs a **topological sort** (Kahn’s algorithm). Among nodes with indegree zero, the sort picks the **smallest original index first**, so when there are no dependency edges, **order stays the same as today’s implicit source order**.
 
-This ensures that:
-
-- decorators with different priorities run deterministically
-- decorators with the same priority preserve their original source order
-
-Sorting is applied when decorator lists are finalized, specifically in:
+Sorting runs when decorator lists are finalized, in the same places as before:
 
 - `_init_step_decorators`
 - `_process_late_attached_decorator`
 
-This means decorators attached dynamically go through the same ordering logic.
+So decorators attached dynamically (for example via `--with`) go through the same ordering logic.
 
-The goal of this change is to make decorator ordering deterministic and explicit without introducing any major architectural change.
+If the graph has a **cycle**, Metaflow raises **`MetaflowException`** with a message naming the decorators involved, instead of leaving order undefined.
 
-### Validating decorator ordering behavior
+**Default `DEPENDS_ON = []`:** existing decorators do not declare edges, so the topological sort produces the same order as before. Opt-in only.
 
-To verify that the proposed ordering setup works as expected, I created a small test flow with custom decorators that implement different `ORDER_PRIORITY` values.
+### Validating ordering behavior manually
 
-The decorators simply print a message during the `task_pre_step` lifecycle hook so the execution order can be observed directly.
+To sanity-check that dependencies affect hook order, you can use a tiny flow with two custom decorators: one provides a `name`, and the other lists that name in `DEPENDS_ON`.
 
-Example test flow:
+Example sketch:
 
 - Code
 
@@ -139,38 +140,49 @@ Example test flow:
             return func
         return decorator
 
-    class FirstDecorator(StepDecorator):
-        name = "first"
-        ORDER_PRIORITY = 10
+    class SetupDecorator(StepDecorator):
+        name = "setup"
 
         def task_pre_step(
-            self, step_name, task_datastore, metadata, run_id, task_id, flow, graph, retry_count, max_user_code_retries, ubf_context, inputs
+            self,
+            step_name,
+            task_datastore,
+            metadata,
+            run_id,
+            task_id,
+            flow,
+            graph,
+            retry_count,
+            max_user_code_retries,
+            ubf_context,
+            inputs,
         ):
-            print("FIRST decorator executed")
+            print("SETUP runs first")
 
-    class SecondDecorator(StepDecorator):
-        name = "second"
-        ORDER_PRIORITY = 10
+    class AfterSetupDecorator(StepDecorator):
+        name = "after_setup"
+        DEPENDS_ON = ["setup"]
 
         def task_pre_step(
-            self, step_name, task_datastore, metadata, run_id, task_id, flow, graph, retry_count, max_user_code_retries, ubf_context, inputs
+            self,
+            step_name,
+            task_datastore,
+            metadata,
+            run_id,
+            task_id,
+            flow,
+            graph,
+            retry_count,
+            max_user_code_retries,
+            ubf_context,
+            inputs,
         ):
-            print("SECOND decorator executed")
+            print("AFTER_SETUP runs second")
 
-    class ThirdDecorator(StepDecorator):
-        name = "third"
-        ORDER_PRIORITY = 10
+    class DependsOnExampleFlow(FlowSpec):
 
-        def task_pre_step(
-            self, step_name, task_datastore, metadata, run_id, task_id, flow, graph, retry_count, max_user_code_retries, ubf_context, inputs
-        ):
-            print("THIRD decorator executed")
-
-    class OrderingPriorityTestFlow(FlowSpec):
-
-        @step_deco(FirstDecorator)
-        @step_deco(SecondDecorator)
-        @step_deco(ThirdDecorator)
+        @step_deco(AfterSetupDecorator)
+        @step_deco(SetupDecorator)
         @step
         def start(self):
             print("STEP BODY")
@@ -181,50 +193,51 @@ Example test flow:
             print("END STEP")
 
     if __name__ == "__main__":
-        OrderingPriorityTestFlow()
+        DependsOnExampleFlow()
     ```
 
-Decorators with lower priority values run earlier. And equal priority preserve their original order
+Even if the decorators are attached bottom-to-top so the raw list order would run `after_setup` before `setup`, after `_sort_step_decorators` the **`setup` hook runs before `after_setup`**, which you should see in the printed order.
 
-Terminal output:
-![alt text](image-1.png)
-Running the flow confirms this behavior.
+**Note:** Python applies decorators from bottom to top, which is why the internal list order does not always match visual order in the source. That is unchanged; what changes is that **explicit edges override ambiguous cases** when you need a guarantee.
 
-**Note:** Python applies decorators from bottom to top, which is why the original decorator list appears in reversed order internally. Also temporarily printed decorator information for debugging.
+### What `DEPENDS_ON` is meant for
 
-### What `ORDER_PRIORITY` does not solve
+It is for **relationships between decorators on the same step** (“run after decorator X by name”), not for arbitrary global priorities. Cycles are rejected at sort time.
 
-It does **not solve dependency relationships** like `Decorator B` depends on `Decorator A.`
-That would require major architectural changes and is outside the scope of this proposal
+### Summary
 
-### **Summary:**
+This gives a **lightweight, explicit dependency model** on top of the existing list-based execution, with **no mandatory ordering** for decorators that keep the default empty `DEPENDS_ON`.
 
-My approach does not introduce dependency relationships between decorators. It provides a way for making ordering deterministic when needed keeping existing behavior by default.
+## 2. Explicit arguments to `task_finished`
 
-# 2. Metadata abstraction
+The task runtime already knows `metadata`, the task datastore (`output`), `run_id`, and `task_id` when it calls the final decorator hook. I extended `StepDecorator.task_finished` so these can be passed as **keyword arguments** from `task.py`, and updated overrides (batch, kubernetes, argo, airflow, step functions, cards, etc.) to accept the same optional parameters.
 
-The repeated metadata registration pattern was centralized by introducing a helper in `StepDecorator`.
+The goal is to **avoid relying on `self` fields** set in `task_pre_step` for data that the runtime can supply directly at the end of the task.
 
-introduced a helper `_register_metadata(...)` to minimize repeated metadata registration pattern
+## 3. Metadata abstraction
 
-This helper handles the creation of `MetaDatum` entries and registers them with the metadata provider.
+The repeated metadata registration pattern was centralized by introducing a helper on `StepDecorator`:
 
-It is now used by several decorators that previously used similar logic.
+`_register_metadata(...)`
+
+This helper builds `MetaDatum` entries (with `attempt_id` tags) and calls `metadata.register_metadata(...)` when there is something to register. It supports `skip_none=True` where the old code skipped `None` values.
+
+It is now used by several decorators that previously duplicated that logic.
 
 The goal here was mainly to **reduce duplicated boilerplate**.
 
-# 3. Shared helpers
+## 4. Shared helpers for compute decorators
 
-In `Batch` and `Kubernetes` decorators, I noticed that many lifecycle operations were structurally identical.
+In **Batch** and **Kubernetes** decorators, many lifecycle operations were structurally identical.
 
-To reduce duplication, a few helper methods were introduced on `StepDecorator`:
+To reduce duplication, helper methods were added on `StepDecorator`, including:
 
 - `_append_package_metadata_to_cli`
 - `_sync_local_metadata_from_datastore`
 - `_start_log_and_spot_sidecars`
 - `_terminate_sidecars`
 
-Both Batch and Kubernetes decorators now reuse these helpers.
+Both decorators reuse these helpers where the behavior matches.
 
 These helpers mainly affect logic inside:
 
@@ -240,9 +253,8 @@ I added a small unit test suite `test/unit/test_decorators_helpers.py`
 
 The tests cover:
 
-- decorator ordering behavior
-- metadata helper behavior
-- filtering of `None` metadata values
+- **`DEPENDS_ON` / `_sort_step_decorators`:** no dependencies preserves source order; simple dependency (A after B); diamond-shaped dependencies; circular dependencies raise `MetaflowException` with a clear message
+- **`_register_metadata`:** registers entries with `attempt_id` tags; default behavior keeps `None` values; `skip_none=True` drops `None` keys from registered metadata
 
 I also ran existing tests related to decorators and compute configuration.
 
@@ -258,17 +270,16 @@ test/unit/test_secrets_decorator.py \
 -q
 ```
 
-Result:
-![alt text](image.png)
+You can attach a screenshot of the terminal output for the PR if helpful; **35** tests passed in the last targeted run.
 
 # My current view on the issue
 
 From exploring the decorator system and experimenting with these changes, my current view is that:
 
 - Decorator lifecycle hooks themselves are already well defined.
-- The main issue is that **ordering between decorators is implicit**.
-- A lightweight mechanism like `ORDER_PRIORITY` can provide more predictable execution without introducing a complex dependency system.
+- The main gaps were **implicit ordering** when two decorators need a relative order in the same stage, and **fragile cross-hook state** when `task_finished` assumed `task_pre_step` had fully populated `self`.
+- **`DEPENDS_ON`** addresses the ordering problem in a **name-based, opt-in** way, with **cycle detection** instead of silent ambiguity.
+- **Passing `metadata`, `task_datastore`, `run_id`, and `task_id` into `task_finished`** makes teardown and bookkeeping hooks more robust.
+- **Helpers** for metadata and for batch/kubernetes-style setup reduce duplication without changing the overall hook model.
 
-Also, some internal improvements are possible by extracting repeated patterns that appear across decorators.
-
-The changes described above were implemented mainly to demonstrate that these improvements are feasible while preserving existing behavior.
+The changes described above are intended to **implement that direction** while preserving default behavior for decorators that do not opt into dependencies.
