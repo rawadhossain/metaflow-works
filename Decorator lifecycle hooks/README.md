@@ -276,10 +276,10 @@ You can attach a screenshot of the terminal output for the PR if helpful; **35**
 
 From exploring the decorator system and experimenting with these changes, my current view is that:
 
-- Decorator lifecycle hooks themselves are already well defined.
-- The main gaps were **implicit ordering** when two decorators need a relative order in the same stage, and **fragile cross-hook state** when `task_finished` assumed `task_pre_step` had fully populated `self`.
-- **`DEPENDS_ON`** addresses the ordering problem in a **name-based, opt-in** way, with **cycle detection** instead of silent ambiguity.
-- **Passing `metadata`, `task_datastore`, `run_id`, and `task_id` into `task_finished`** makes teardown and bookkeeping hooks more robust.
-- **Helpers** for metadata and for batch/kubernetes-style setup reduce duplication without changing the overall hook model.
+- Decorator lifecycle hooks are already well defined.
+- The main gaps were **implicit ordering** when two decorators need a specific order in the same stage, and **fragile cross-hook state** when `task_finished` assumes `task_pre_step` has fully set up `self`.
+- **`DEPENDS_ON`** addresses the ordering problem in a **name-based, opt-in** way, with **cycle detection** instead of unclear or unpredictable behavior.
+- **Passing `metadata`, `task_datastore`, `run_id`, and `task_id` into `task_finished`** makes teardown and tracking logic more reliable.
+- **Helpers** for metadata and for batch/kubernetes-style setup reduce duplication without changing how hooks work overall.
 
-The changes described above are intended to **implement that direction** while preserving default behavior for decorators that do not opt into dependencies.
+The changes described above are intended to **implement that direction** while keeping the default behavior the same for decorators that don’t use dependencies.
